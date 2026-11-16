@@ -3,60 +3,80 @@
 
 MPU6050 mpu(Wire);
 
-const int ENA = 11;
-const int ENB = 6;
-const int IN1 = 10;
-const int IN2 = 9;
-const int IN3 = 8;
-const int IN4 = 7;
+struct Motor {
+  int en;   
+  int inA;   
+  int inB;   
+};
 
-const int frontTrig = 5;
-const int frontEcho = 4;
-const int leftTrig = 2;
-const int leftEcho = 3;
-const int rightTrig = A2;
-const int rightEcho = A1;
+struct Ultrasonic {
+  int trig;
+  int echo;
+  float distance; 
+};
+
+enum MotorId  { MOTOR_RIGHT = 0, MOTOR_LEFT = 1, NUM_MOTORS = 2 };
+enum SensorId { SENSOR_FRONT = 0, SENSOR_LEFT = 1, SENSOR_RIGHT = 2, NUM_SENSORS = 3 };
+
+Motor motors[NUM_MOTORS] = {
+  {11, 10, 9},   // Right motor: ENA, IN1, IN2
+  { 6,  8, 7}    // Left motor : ENB, IN3, IN4
+};
+
+Ultrasonic sensors[NUM_SENSORS] = {
+  { 5,  4, 0},   // Front
+  { 2,  3, 0},   // Left
+  {A2, A1, 0}    // Right
+};
+
+const byte MPU_ADDRESSES[2] = {0x68, 0x69};
+
 const int ir = A0;
 
+const int DIR_FORWARD  =  1;
+const int DIR_BACKWARD = -1;
+const int DIR_STOP     =  0;
+
 const int DRIVE_SPEED = 100;
-const int TURN_SPEED = 115;
-const float TURN_90_ANGLE = 65.0;
+const int TURN_SPEED  = 115;
+const float TURN_90_ANGLE  = 65.0;
 const float TURN_180_ANGLE = 150.0;
 
-const int SIDE_OPEN_DIST = 14;
-const int FRONT_STOP_DIST = 7;
+const int SIDE_OPEN_DIST   = 14;
+const int FRONT_STOP_DIST  = 7;
 const int PRE_TURN_STEP_MS = 200;
-const int EXIT_IGNORE_MS = 650;
+const int EXIT_IGNORE_MS   = 650;
 
 float targetHeading = 0.0;
 bool justStarted = true;
 
+// ========================= SETUP ==========================
 void setup() {
-  pinMode(ENA, OUTPUT);
-  pinMode(ENB, OUTPUT);
-  pinMode(IN1, OUTPUT);
-  pinMode(IN2, OUTPUT);
-  pinMode(IN3, OUTPUT);
-  pinMode(IN4, OUTPUT);
+  // LOOP over motor array
+  for (int i = 0; i < NUM_MOTORS; i++) {
+    pinMode(motors[i].en,  OUTPUT);
+    pinMode(motors[i].inA, OUTPUT);
+    pinMode(motors[i].inB, OUTPUT);
+  }
 
-  pinMode(frontTrig, OUTPUT);
-  pinMode(frontEcho, INPUT);
-  pinMode(leftTrig, OUTPUT);
-  pinMode(leftEcho, INPUT);
-  pinMode(rightTrig, OUTPUT);
-  pinMode(rightEcho, INPUT);
+  // LOOP over sensor array
+  for (int i = 0; i < NUM_SENSORS; i++) {
+    pinMode(sensors[i].trig, OUTPUT);
+    pinMode(sensors[i].echo, INPUT);
+  }
   pinMode(ir, INPUT);
 
   Wire.begin();
   Wire.setWireTimeout(3000, true);
 
-  Wire.beginTransmission(0x68);
-  byte error68 = Wire.endTransmission();
-
-  Wire.beginTransmission(0x69);
-  byte error69 = Wire.endTransmission();
-
-  if (error69 == 0) {
+  byte foundAddress = 0x68;
+  for (int i = 0; i < 2; i++) {
+    Wire.beginTransmission(MPU_ADDRESSES[i]);
+    if (Wire.endTransmission() == 0) {
+      foundAddress = MPU_ADDRESSES[i];
+    }
+  }
+  if (foundAddress == 0x69) {
     mpu.setAddress(0x69);
   }
 
@@ -66,12 +86,15 @@ void setup() {
   targetHeading = 0.0;
 }
 
+
 void loop() {
   mpu.update();
 
-  float frontDist = getDistance(frontTrig, frontEcho);
-  float leftDist  = getDistance(leftTrig, leftEcho);
-  float rightDist = getDistance(rightTrig, rightEcho);
+  readAllSensors(sensors, NUM_SENSORS);
+
+  float frontDist = sensors[SENSOR_FRONT].distance;
+  float leftDist  = sensors[SENSOR_LEFT].distance;
+  float rightDist = sensors[SENSOR_RIGHT].distance;
 
   bool leftIsOpen  = (leftDist > SIDE_OPEN_DIST);
   bool rightIsOpen = (rightDist > SIDE_OPEN_DIST);
@@ -79,26 +102,50 @@ void loop() {
 
   if (leftIsOpen) {
     justStarted = false;
-    alignIntoIntersection(PRE_TURN_STEP_MS);
-    turnLeft90IMU();
-    exitTurnDriveForward(EXIT_IGNORE_MS);
-  } 
+    handleTurn(TURN_90_ANGLE);          // left = positive angle
+  }
   else if (rightIsOpen) {
     justStarted = false;
-    alignIntoIntersection(PRE_TURN_STEP_MS);
-    turnRight90IMU();
-    exitTurnDriveForward(EXIT_IGNORE_MS);
-  } 
+    handleTurn(-TURN_90_ANGLE);         // right = negative angle
+  }
   else if (frontIsOpen || justStarted) {
     driveStraightAtHeading();
     if (frontDist > 15) {
       justStarted = false;
     }
-  } 
+  }
   else {
     cleanStop();
-    turnAround180IMU();
+    turnIMU(TURN_180_ANGLE);
     exitTurnDriveForward(EXIT_IGNORE_MS);
+  }
+}
+
+// ====================== MOTOR FUNCTIONS
+
+void setMotor(const Motor *m, int speed, int dir) {
+  if (dir == DIR_FORWARD) {
+    digitalWrite(m->inA, LOW);
+    digitalWrite(m->inB, HIGH);
+  } else if (dir == DIR_BACKWARD) {
+    digitalWrite(m->inA, HIGH);
+    digitalWrite(m->inB, LOW);
+  } else {
+    digitalWrite(m->inA, LOW);
+    digitalWrite(m->inB, LOW);
+    speed = 0;
+  }
+  analogWrite(m->en, speed);
+}
+
+void drive(int rightSpeed, int rightDir, int leftSpeed, int leftDir) {
+  setMotor(&motors[MOTOR_RIGHT], rightSpeed, rightDir);
+  setMotor(&motors[MOTOR_LEFT],  leftSpeed,  leftDir);
+}
+
+void stopMotors() {
+  for (int i = 0; i < NUM_MOTORS; i++) {
+    setMotor(&motors[i], 0, DIR_STOP);
   }
 }
 
@@ -107,22 +154,31 @@ void cleanStop() {
   delay(80);
 }
 
+void driveWithHeading(int rightBase, int leftBase, int maxSpeed) {
+  mpu.update();
+  float error = targetHeading - mpu.getAngleZ();
+  int correction = error * 3;
+
+  int rightSpeed = constrain(rightBase + correction, 65, maxSpeed);
+  int leftSpeed  = constrain(leftBase  - correction, 65, maxSpeed);
+
+  drive(rightSpeed, DIR_FORWARD, leftSpeed, DIR_FORWARD);
+}
+
+void driveStraightAtHeading() {
+  driveWithHeading(DRIVE_SPEED, DRIVE_SPEED - 5, 130);
+}
+
+// ====================== MOVEMENT FUNCTIONS ================
+
 void alignIntoIntersection(int maxMs) {
   unsigned long start = millis();
   while (millis() - start < maxMs) {
-    float d = getDistance(frontTrig, frontEcho);
+    float d = readSensor(&sensors[SENSOR_FRONT]);
     if (d > 0 && d <= FRONT_STOP_DIST) {
       break;
     }
-    mpu.update();
-    float error = targetHeading - mpu.getAngleZ();
-    int correction = error * 3;
-    analogWrite(ENA, constrain(85 + correction, 65, 120));
-    analogWrite(ENB, constrain(80 - correction, 65, 120));
-    digitalWrite(IN1, LOW);
-    digitalWrite(IN2, HIGH);
-    digitalWrite(IN3, LOW);
-    digitalWrite(IN4, HIGH);
+    driveWithHeading(85, 80, 120);
   }
   cleanStop();
 }
@@ -130,7 +186,7 @@ void alignIntoIntersection(int maxMs) {
 void exitTurnDriveForward(int ms) {
   unsigned long start = millis();
   while (millis() - start < ms) {
-    float d = getDistance(frontTrig, frontEcho);
+    float d = readSensor(&sensors[SENSOR_FRONT]);
     if (d > 0 && d <= 5) {
       cleanStop();
       break;
@@ -139,18 +195,18 @@ void exitTurnDriveForward(int ms) {
   }
 }
 
-void turnLeft90IMU() {
+void turnIMU(float degrees) {
   mpu.update();
-  float stopAngle = mpu.getAngleZ() + TURN_90_ANGLE;
+  float stopAngle = mpu.getAngleZ() + degrees;
+  bool turningLeft = (degrees > 0);
 
-  while (mpu.getAngleZ() < stopAngle) {
+  int rightDir = turningLeft ? DIR_FORWARD  : DIR_BACKWARD;
+  int leftDir  = turningLeft ? DIR_BACKWARD : DIR_FORWARD;
+
+  while (turningLeft ? (mpu.getAngleZ() < stopAngle)
+                     : (mpu.getAngleZ() > stopAngle)) {
     mpu.update();
-    analogWrite(ENA, TURN_SPEED);
-    analogWrite(ENB, TURN_SPEED + 5);
-    digitalWrite(IN1, LOW);
-    digitalWrite(IN2, HIGH);
-    digitalWrite(IN3, HIGH);
-    digitalWrite(IN4, LOW);
+    drive(TURN_SPEED, rightDir, TURN_SPEED + 5, leftDir);
   }
 
   cleanStop();
@@ -158,77 +214,31 @@ void turnLeft90IMU() {
   targetHeading = mpu.getAngleZ();
 }
 
-void turnRight90IMU() {
-  mpu.update();
-  float stopAngle = mpu.getAngleZ() - TURN_90_ANGLE;
-
-  while (mpu.getAngleZ() > stopAngle) {
-    mpu.update();
-    analogWrite(ENA, TURN_SPEED);
-    analogWrite(ENB, TURN_SPEED + 5);
-    digitalWrite(IN1, HIGH);
-    digitalWrite(IN2, LOW);
-    digitalWrite(IN3, LOW);
-    digitalWrite(IN4, HIGH);
-  }
-
-  cleanStop();
-  mpu.update();
-  targetHeading = mpu.getAngleZ();
+void handleTurn(float degrees) {
+  alignIntoIntersection(PRE_TURN_STEP_MS);
+  turnIMU(degrees);
+  exitTurnDriveForward(EXIT_IGNORE_MS);
 }
 
-void turnAround180IMU() {
-  mpu.update();
-  float stopAngle = mpu.getAngleZ() + TURN_180_ANGLE;
+// ====================== SENSOR FUNCTIONS 
 
-  while (mpu.getAngleZ() < stopAngle) {
-    mpu.update();
-    analogWrite(ENA, TURN_SPEED);
-    analogWrite(ENB, TURN_SPEED + 5);
-    digitalWrite(IN1, LOW);
-    digitalWrite(IN2, HIGH);
-    digitalWrite(IN3, HIGH);
-    digitalWrite(IN4, LOW);
-  }
-
-  cleanStop();
-  mpu.update();
-  targetHeading = mpu.getAngleZ();
-}
-
-void driveStraightAtHeading() {
-  mpu.update();
-  float error = targetHeading - mpu.getAngleZ();
-  int correction = error * 3;
-
-  int rightSpeed = constrain(DRIVE_SPEED + correction, 65, 130);
-  int leftSpeed  = constrain((DRIVE_SPEED - 5) - correction, 65, 130);
-
-  analogWrite(ENA, rightSpeed);
-  analogWrite(ENB, leftSpeed);
-  digitalWrite(IN1, LOW);
-  digitalWrite(IN2, HIGH);
-  digitalWrite(IN3, LOW);
-  digitalWrite(IN4, HIGH);
-}
-
-void stopMotors() {
-  analogWrite(ENA, 0);
-  analogWrite(ENB, 0);
-  digitalWrite(IN1, LOW);
-  digitalWrite(IN2, LOW);
-  digitalWrite(IN3, LOW);
-  digitalWrite(IN4, LOW);
-}
-
-float getDistance(int trigPin, int echoPin) {
-  digitalWrite(trigPin, LOW);
+// POINTER: writes the result directly into the structure
+float readSensor(Ultrasonic *s) {
+  digitalWrite(s->trig, LOW);
   delayMicroseconds(2);
-  digitalWrite(trigPin, HIGH);
+  digitalWrite(s->trig, HIGH);
   delayMicroseconds(10);
-  digitalWrite(trigPin, LOW);
+  digitalWrite(s->trig, LOW);
 
-  long duration = pulseIn(echoPin, HIGH, 15000);
+  long duration = pulseIn(s->echo, HIGH, 15000);
   delay(10);
-  return duration * 0.0343 / 2.0;
+  s->distance = duration * 0.0343 / 2.0;
+  return s->distance;
+}
+
+// POINTER to array + LOOP
+void readAllSensors(Ultrasonic *list, int count) {
+  for (int i = 0; i < count; i++) {
+    readSensor(list + i);  
+  }
 }
